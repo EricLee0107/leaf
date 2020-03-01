@@ -17,37 +17,37 @@ type Server struct {
 	// func(args []interface{})
 	// func(args []interface{}) interface{}
 	// func(args []interface{}) []interface{}
-	functions map[interface{}]interface{}
-	ChanCall  chan *CallInfo
+	functions map[interface{}]interface{}	// 用于保存注册rpc函数
+	ChanCall  chan *CallInfo					// 用于接收rpc调用chan
 }
 
 type CallInfo struct {
-	f       interface{}
-	args    []interface{}
-	chanRet chan *RetInfo
-	cb      interface{}
+	f       interface{}		//rpc调用的函数
+	args    []interface{}		//参数
+	chanRet chan *RetInfo		//传递ret的chan
+	cb      interface{}		//保存上下文中的Call back函数
 }
 
 type RetInfo struct {
 	// nil
 	// interface{}
 	// []interface{}
-	ret interface{}
-	err error
+	ret interface{}		// 记录返回值，有三种类型
+	err error				// 记录error
 	// callback:
 	// func(err error)
 	// func(ret interface{}, err error)
 	// func(ret []interface{}, err error)
-	cb interface{}
+	cb interface{}			// 保证上下文中的Call back函数
 }
 
 type Client struct {
-	s               *Server
-	chanSyncRet     chan *RetInfo
-	ChanAsynRet     chan *RetInfo
-	pendingAsynCall int
+	s               *Server				//对应的Server
+	chanSyncRet     chan *RetInfo		//同步调用时候，用于接收ret的chan
+	ChanAsynRet     chan *RetInfo		//异步调用时，用于接收ret和cb的chan
+	pendingAsynCall int					//异步调用的计步器
 }
-
+// 初始化一个Server结构
 func NewServer(l int) *Server {
 	s := new(Server)
 	s.functions = make(map[interface{}]interface{})
@@ -65,6 +65,7 @@ func assert(i interface{}) []interface{} {
 
 // you must call the function before calling Open and Go
 func (s *Server) Register(id interface{}, f interface{}) {
+	// 通过switch/case 对f的类型做一个类型判断。只对三种类型的函数做响应，其他类型的都会在default中panic
 	switch f.(type) {
 	case func([]interface{}):
 	case func([]interface{}) interface{}:
@@ -72,15 +73,16 @@ func (s *Server) Register(id interface{}, f interface{}) {
 	default:
 		panic(fmt.Sprintf("function id %v: definition of function is invalid", id))
 	}
-
+	// 判断id是否已经注册过
 	if _, ok := s.functions[id]; ok {
 		panic(fmt.Sprintf("function id %v: already registered", id))
 	}
-
+	// 注册，将f放到map中
 	s.functions[id] = f
 }
 
 func (s *Server) ret(ci *CallInfo, ri *RetInfo) (err error) {
+	// 当client调用的时候，没有注册chanret时，不需要传递返回值，则直接返回不处理，否则继续向下处理
 	if ci.chanRet == nil {
 		return
 	}
@@ -90,7 +92,7 @@ func (s *Server) ret(ci *CallInfo, ri *RetInfo) (err error) {
 			err = r.(error)
 		}
 	}()
-
+	// 将client调用rpc时，注册的cb，传递到RetInfo中。并将RetInfo发送到CallInfo中的chanRet中，将ret信息和cb传递给Client
 	ri.cb = ci.cb
 	ci.chanRet <- ri
 	return
@@ -110,7 +112,7 @@ func (s *Server) exec(ci *CallInfo) (err error) {
 			s.ret(ci, &RetInfo{err: fmt.Errorf("%v", r)})
 		}
 	}()
-
+	// 根据不同的rpc函数类型，封装不同的RetInfo
 	// execute
 	switch ci.f.(type) {
 	case func([]interface{}):
@@ -135,6 +137,7 @@ func (s *Server) Exec(ci *CallInfo) {
 }
 
 // goroutine safe
+// Go模式，查找对应id的rpc函数，构建CallInfo发送到chancall中
 func (s *Server) Go(id interface{}, args ...interface{}) {
 	f := s.functions[id]
 	if f == nil {
@@ -166,6 +169,8 @@ func (s *Server) CallN(id interface{}, args ...interface{}) ([]interface{}, erro
 	return s.Open(0).CallN(id, args...)
 }
 
+// 向将chancall关闭
+// 处理chancall中剩余的rpc调用。并不会执行而是执行返回错误。
 func (s *Server) Close() {
 	close(s.ChanCall)
 
@@ -177,23 +182,28 @@ func (s *Server) Close() {
 }
 
 // goroutine safe
+// 将Client的创建和Attach封装在一起
 func (s *Server) Open(l int) *Client {
 	c := NewClient(l)
 	c.Attach(s)
 	return c
 }
-
+// 两种初始化模式
+// 创建一个新的Client,初始化client结构，同步chanSyncRet容量为1；异步chanAsynRet的容量为传入的参数l
 func NewClient(l int) *Client {
 	c := new(Client)
 	c.chanSyncRet = make(chan *RetInfo, 1)
 	c.ChanAsynRet = make(chan *RetInfo, l)
 	return c
 }
-
+// 对现有的Client进行Attach,将*Server初始化到client中的成员变量s
 func (c *Client) Attach(s *Server) {
 	c.s = s
 }
-
+// 这个方法，在同步和异步中都会被调用，block为true代表同步，block为false代表异步。
+// 将CallInfo信息通过server的chancall发送给server
+// 同步模式下如果chancall容量不足，则会阻塞等待；异步模式，如果chancall的容量不足，则直接返回default，返回错误。
+// chancall的容量在NewServer的时候传入的l参数就是chancall的容量，具体看NewServer
 func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -212,7 +222,7 @@ func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	}
 	return
 }
-
+// 从server的注册函数中，查找对应id的函数，并将其返回n表示f的不同类型
 func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	if c.s == nil {
 		err = errors.New("server not attached")
@@ -226,6 +236,7 @@ func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	}
 
 	var ok bool
+	// 根据n检查函数的类型是否正确
 	switch n {
 	case 0:
 		_, ok = f.(func([]interface{}))
@@ -242,7 +253,11 @@ func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	}
 	return
 }
-
+// 同步调用
+// Call0 Call1 CallN三个的步骤是一样的
+// 步骤1：先查找函数f
+// 步骤2：远程调用call，block设置为true（这里是和异步调用的区别，异步调用将block设置为false）
+// 步骤3：从chanSyncRet中接收ret，并将ret返回给上一层
 func (c *Client) Call0(id interface{}, args ...interface{}) error {
 	f, err := c.f(id, 0)
 	if err != nil {
@@ -300,6 +315,7 @@ func (c *Client) CallN(id interface{}, args ...interface{}) ([]interface{}, erro
 	return assert(ri.ret), ri.err
 }
 
+// 思路与同步调用相同，只是block设置为false，chanRet为chanAsynRet
 func (c *Client) asynCall(id interface{}, args []interface{}, cb interface{}, n int) {
 	f, err := c.f(id, n)
 	if err != nil {
@@ -340,15 +356,18 @@ func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
 	}
 
 	// too many calls
+	// 如果异步调用计数超过异步调用的通道（ChanAsynRet）容量，则直接执行回调函数抛出异常
 	if c.pendingAsynCall >= cap(c.ChanAsynRet) {
 		execCb(&RetInfo{err: errors.New("too many calls"), cb: cb})
 		return
 	}
-
+	// 异步调用
 	c.asynCall(id, args, cb, n)
+	// 异步调用计数+1
 	c.pendingAsynCall++
 }
 
+// 通过RetInfo中获得cb函数，通过不同类型，进行cb调用。
 func execCb(ri *RetInfo) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -375,12 +394,13 @@ func execCb(ri *RetInfo) {
 	}
 	return
 }
-
+// 当异步执行完后，处理异步计数-1并执行回调函数
 func (c *Client) Cb(ri *RetInfo) {
 	c.pendingAsynCall--
 	execCb(ri)
 }
 
+// 当Client关闭时，会等待所有异步执行的rpc执行完毕，同步的是不用处理的，肯定会处理结束。
 func (c *Client) Close() {
 	for c.pendingAsynCall > 0 {
 		c.Cb(<-c.ChanAsynRet)
