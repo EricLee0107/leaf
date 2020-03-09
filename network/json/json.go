@@ -8,7 +8,7 @@ import (
 	"github.com/name5566/leaf/log"
 	"reflect"
 )
-
+// 保存一系列注册的msginfo
 type Processor struct {
 	msgInfo map[string]*MsgInfo
 }
@@ -34,19 +34,24 @@ func NewProcessor() *Processor {
 }
 
 // It's dangerous to call the method on routing or marshaling (unmarshaling)
+// 注册一个消息
 func (p *Processor) Register(msg interface{}) string {
+	// 获取类型信息（通过反射获取）
 	msgType := reflect.TypeOf(msg)
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
 		log.Fatal("json message pointer required")
 	}
+	// 获取消息结构类型，注意msg需要是引用（指针）
 	msgID := msgType.Elem().Name()
 	if msgID == "" {
 		log.Fatal("unnamed json message")
 	}
+	// 判断消息是否已经存在
 	if _, ok := p.msgInfo[msgID]; ok {
 		log.Fatal("message %v is already registered", msgID)
 	}
 
+	// 建立id和msgInfo的映射关系，返回消息id（这个id代表消息名）
 	i := new(MsgInfo)
 	i.msgType = msgType
 	p.msgInfo[msgID] = i
@@ -54,21 +59,24 @@ func (p *Processor) Register(msg interface{}) string {
 }
 
 // It's dangerous to call the method on routing or marshaling (unmarshaling)
+// 设置magInfo的路由信息
 func (p *Processor) SetRouter(msg interface{}, msgRouter *chanrpc.Server) {
 	msgType := reflect.TypeOf(msg)
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
 		log.Fatal("json message pointer required")
 	}
+	// 查找msg是否存在，如果不存在返回错误
 	msgID := msgType.Elem().Name()
 	i, ok := p.msgInfo[msgID]
 	if !ok {
 		log.Fatal("message %v not registered", msgID)
 	}
-
+		//将传入的chanrpc参数赋值给msgInfo
 	i.msgRouter = msgRouter
 }
 
 // It's dangerous to call the method on routing or marshaling (unmarshaling)
+// 设置msgInfo的Handler，逻辑同SetRouter
 func (p *Processor) SetHandler(msg interface{}, msgHandler MsgHandler) {
 	msgType := reflect.TypeOf(msg)
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
@@ -84,6 +92,7 @@ func (p *Processor) SetHandler(msg interface{}, msgHandler MsgHandler) {
 }
 
 // It's dangerous to call the method on routing or marshaling (unmarshaling)
+// 设置msgInfo的RawHandler，逻辑同SetRouter
 func (p *Processor) SetRawHandler(msgID string, msgRawHandler MsgHandler) {
 	i, ok := p.msgInfo[msgID]
 	if !ok {
@@ -112,6 +121,7 @@ func (p *Processor) Route(msg interface{}, userData interface{}) error {
 	if msgType == nil || msgType.Kind() != reflect.Ptr {
 		return errors.New("json message pointer required")
 	}
+	// 查找msg消息
 	msgID := msgType.Elem().Name()
 	i, ok := p.msgInfo[msgID]
 	if !ok {
@@ -120,6 +130,7 @@ func (p *Processor) Route(msg interface{}, userData interface{}) error {
 	if i.msgHandler != nil {
 		i.msgHandler([]interface{}{msg, userData})
 	}
+	// 调用chanrpc中的Go，这里是json与chanrpc连接的部分
 	if i.msgRouter != nil {
 		i.msgRouter.Go(msgType, msg, userData)
 	}
